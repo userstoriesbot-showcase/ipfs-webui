@@ -1,0 +1,41 @@
+# Showcase fork only (never part of an upstream pull request).
+version: 1
+app:
+  # npm ci skips install scripts so the kubo package does not fetch from dist.ipfs.tech; the
+  # scripts that matter (esbuild, swc, patch-package) run afterwards. The Kubo binary for the
+  # locked version comes from GitHub releases, checked against its published sha512. It gets a
+  # throwaway repo with the test profile (no bootstrap peers) and its RPC API on 127.0.0.1:5001.
+  # The CRA dev server proxies /api/v0 to it, so the browser only needs the app port. The daemon
+  # logs into the app log with an [ipfs] prefix, and start fails if its API never answers.
+  install: >-
+    npm ci --include=dev --ignore-scripts &&
+    npm rebuild esbuild @swc/core &&
+    npm run postinstall &&
+    npm pkg set proxy=http://127.0.0.1:5001 &&
+    KV=v$(node -p "require('./package-lock.json').packages['node_modules/kubo'].version") &&
+    KO=$(uname -s | tr A-Z a-z) &&
+    KA=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') &&
+    KF=kubo_${KV}_${KO}-${KA}.tar.gz &&
+    rm -rf .kubo .ipfs-demo && mkdir .kubo &&
+    curl -fsSL --retry 5 --retry-all-errors -o .kubo/$KF https://github.com/ipfs/kubo/releases/download/$KV/$KF &&
+    curl -fsSL --retry 5 --retry-all-errors -o .kubo/$KF.sha512 https://github.com/ipfs/kubo/releases/download/$KV/$KF.sha512 &&
+    (cd .kubo && sha512sum -c $KF.sha512) &&
+    tar -xzf .kubo/$KF -C .kubo &&
+    IPFS_PATH="$PWD/.ipfs-demo" .kubo/kubo/ipfs init --profile test &&
+    IPFS_PATH="$PWD/.ipfs-demo" .kubo/kubo/ipfs config Addresses.API /ip4/127.0.0.1/tcp/5001 &&
+    IPFS_PATH="$PWD/.ipfs-demo" .kubo/kubo/ipfs config Addresses.Gateway /ip4/127.0.0.1/tcp/8080 &&
+    IPFS_PATH="$PWD/.ipfs-demo" .kubo/kubo/ipfs config --json API.HTTPHeaders.Access-Control-Allow-Origin '["*"]'
+  start: >-
+    export IPFS_PATH="$PWD/.ipfs-demo" &&
+    rm -f .ipfs-demo/repo.lock &&
+    (.kubo/kubo/ipfs daemon 2>&1 | sed -u 's/^/[ipfs] /' &) &&
+    for i in $(seq 60); do curl -sf -X POST http://127.0.0.1:5001/api/v0/version > /dev/null && break; sleep 1; done &&
+    curl -sf -X POST http://127.0.0.1:5001/api/v0/version | sed 's/^/[ipfs] API up: /' &&
+    BROWSER=none PORT={port} npm start
+  url: http://localhost:{port}
+  readyPath: /
+  readyStatus: 200
+  runtime: node24
+demo:
+  maxVideos: 1
+  beforePass: false  # the change is a text fix; a second start raced the first daemon for the repo
